@@ -10,3 +10,7 @@ src/main/obj
 /build
 /captures
 builddir
+
+src/main/jni/libs/
+src/main/jni/obj/
+src/main/jni/libjniPdfium.so
