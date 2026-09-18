@@ -23,6 +23,7 @@ extern "C" {
     #include <string.h>
     #include <stdio.h>
 }
+#include <vector>
 #include <fpdf_edit.h>
 #include <fpdf_save.h>
 
@@ -891,12 +892,12 @@ JNI_FUNC(jboolean, PdfiumCore, nativeSetPageObjectText)(JNI_ARGS, jlong pageObje
 
     const jchar *raw = env->GetStringChars(text, NULL);
     if (raw == NULL) return JNI_FALSE;
-
-    // jchar is UTF-16 in platform-native order; Android is little-endian,
-    // which matches FPDF_WIDESTRING's expected UTF-16LE.
-    FPDF_BOOL result = FPDFText_SetText(pageObject, reinterpret_cast<FPDF_WIDESTRING>(raw));
+    jsize len = env->GetStringLength(text);
+    std::vector<jchar> wide(raw, raw + len);
+    wide.push_back(0);  // FPDF_WIDESTRING must be null-terminated
     env->ReleaseStringChars(text, raw);
 
+    FPDF_BOOL result = FPDFText_SetText(pageObject, reinterpret_cast<FPDF_WIDESTRING>(wide.data()));
     return result ? JNI_TRUE : JNI_FALSE;
 }
 
@@ -918,6 +919,55 @@ JNI_FUNC(jobject, PdfiumCore, nativeGetObjectBounds)(JNI_ARGS, jlong pageObjectP
     jclass clazz = env->FindClass("android/graphics/RectF");
     jmethodID constructorID = env->GetMethodID(clazz, "<init>", "(FFFF)V");
     return env->NewObject(clazz, constructorID, left, top, right, bottom);
+}
+
+JNI_FUNC(jboolean, PdfiumCore, nativeRemovePageObject)(JNI_ARGS, jlong pagePtr, jlong pageObjectPtr) {
+    if (pagePtr == 0 || pageObjectPtr == 0) return JNI_FALSE;
+    FPDF_PAGE page = reinterpret_cast<FPDF_PAGE>(pagePtr);
+    FPDF_PAGEOBJECT obj = reinterpret_cast<FPDF_PAGEOBJECT>(pageObjectPtr);
+    if (!FPDFPage_RemoveObject(page, obj)) return JNI_FALSE;
+    FPDFPageObj_Destroy(obj);
+    return JNI_TRUE;
+}
+
+JNI_FUNC(jlong, PdfiumCore, nativeAddTextObject)(JNI_ARGS, jlong docPtr, jlong pagePtr, jstring text,
+                                                 jfloat fontSize, jfloat x, jfloat baselineY,
+                                                 jfloat maxWidth, jint argb) {
+    if (docPtr == 0 || pagePtr == 0 || text == NULL) return 0;
+    FPDF_DOCUMENT doc = reinterpret_cast<FPDF_DOCUMENT>(docPtr);
+    FPDF_PAGE page = reinterpret_cast<FPDF_PAGE>(pagePtr);
+
+    const jchar *raw = env->GetStringChars(text, NULL);
+    if (raw == NULL) return 0;
+    jsize len = env->GetStringLength(text);
+    std::vector<jchar> wide(raw, raw + len);
+    wide.push_back(0);
+    env->ReleaseStringChars(text, raw);
+
+    FPDF_PAGEOBJECT obj = FPDFPageObj_NewTextObj(doc, "Helvetica", fontSize);
+    if (obj == NULL) return 0;
+
+    // Fails if Helvetica (WinAnsi) can't encode a character.
+    if (!FPDFText_SetText(obj, reinterpret_cast<FPDF_WIDESTRING>(wide.data()))) {
+        FPDFPageObj_Destroy(obj);
+        return 0;
+    }
+
+    FPDFPageObj_SetFillColor(obj, (argb >> 16) & 0xFF, (argb >> 8) & 0xFF, argb & 0xFF, 255);
+
+    // Shrink-to-fit, same rule as TextEditRenderer (min 0.5x).
+    double scale = 1.0;
+    float l, b, r, t;
+    if (maxWidth > 0 && FPDFPageObj_GetBounds(obj, &l, &b, &r, &t)) {
+        float width = r - l;
+        if (width > maxWidth) {
+            scale = maxWidth / width;
+            if (scale < 0.5) scale = 0.5;
+        }
+    }
+    FPDFPageObj_Transform(obj, scale, 0, 0, scale, x, baselineY);
+    FPDFPage_InsertObject(page, obj);
+    return reinterpret_cast<jlong>(obj);
 }
 
 // --- save path: FPDF_FILEWRITE shim that forwards chunks to a Java OutputStream ---

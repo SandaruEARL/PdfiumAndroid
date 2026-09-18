@@ -667,6 +667,37 @@ public class PdfiumCore {
     }
 
     /**
+     * Removes and destroys a page object. Close the text page first
+     * (closeTextPage) because it references these objects.
+     */
+    public boolean removePageObject(PdfDocument doc, int pageIndex, long pageObjectPtr) {
+        synchronized (lock) {
+            Long pagePtr = doc.mNativePagesPtr.get(pageIndex);
+            if (pagePtr == null) return false;
+            return nativeRemovePageObject(pagePtr, pageObjectPtr);
+        }
+    }
+
+    /**
+     * Inserts a new Helvetica text object. Coordinates are in pdfium page space
+     * (origin bottom-left, points). Returns the object pointer, or 0 if the text
+     * can't be encoded.
+     */
+    public long addTextObject(PdfDocument doc, int pageIndex, String text, float fontSize,
+                              float x, float baselineY, float maxWidth, int argb) {
+        synchronized (lock) {
+            Long pagePtr = doc.mNativePagesPtr.get(pageIndex);
+            if (pagePtr == null) return 0;
+            return nativeAddTextObject(doc.mNativeDocPtr, pagePtr, text, fontSize, x, baselineY, maxWidth, argb);
+        }
+    }
+
+    private native boolean nativeRemovePageObject(long pagePtr, long pageObjectPtr);
+
+    private native long nativeAddTextObject(long docPtr, long pagePtr, String text, float fontSize,
+                                            float x, float baselineY, float maxWidth, int argb);
+
+    /**
      * Rebuilds the page's content stream after object edits. Must be called
      * before saveDocument() or the edits on this page are silently lost.
      */
