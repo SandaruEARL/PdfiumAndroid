@@ -23,6 +23,8 @@ extern "C" {
     #include <string.h>
     #include <stdio.h>
 }
+#include <fpdf_edit.h>
+#include <fpdf_save.h>
 
 #include <android/native_window.h>
 #include <android/native_window_jni.h>
@@ -810,7 +812,7 @@ JNI_FUNC(void, PdfiumCore, nativeCloseTextPage)(JNI_ARGS, jlong textPagePtr) {
 
 JNI_FUNC(jint, PdfiumCore, nativeGetPageTextCount)(JNI_ARGS, jlong textPagePtr) {
     if (textPagePtr == 0) {
-        return;
+        return 0;
     }
     FPDF_TEXTPAGE textPage = reinterpret_cast<FPDF_TEXTPAGE>(textPagePtr);
     if (textPage == NULL) {
@@ -821,7 +823,7 @@ JNI_FUNC(jint, PdfiumCore, nativeGetPageTextCount)(JNI_ARGS, jlong textPagePtr) 
 
 JNI_FUNC(jstring, PdfiumCore, nativeGetPageText)(JNI_ARGS, jlong textPagePtr, jint startIndex, jint count) {
     if (textPagePtr == 0) {
-        return;
+        return nullptr;
     }
     FPDF_TEXTPAGE textPage = reinterpret_cast<FPDF_TEXTPAGE>(textPagePtr);
     if (textPage == NULL || count <= 0) {
@@ -844,7 +846,7 @@ JNI_FUNC(jstring, PdfiumCore, nativeGetPageText)(JNI_ARGS, jlong textPagePtr, ji
 JNI_FUNC(jint, PdfiumCore, nativeGetCharIndexAtCoord)(JNI_ARGS, jlong textPagePtr, jdouble pageX, jdouble pageY,
                                                       jdouble xTolerance, jdouble yTolerance) {
     if (textPagePtr == 0) {
-        return;
+        return -1;
     }
     FPDF_TEXTPAGE textPage = reinterpret_cast<FPDF_TEXTPAGE>(textPagePtr);
     if (textPage == NULL) {
@@ -855,7 +857,7 @@ JNI_FUNC(jint, PdfiumCore, nativeGetCharIndexAtCoord)(JNI_ARGS, jlong textPagePt
 
 JNI_FUNC(jobject, PdfiumCore, nativeGetCharBox)(JNI_ARGS, jlong textPagePtr, jint charIndex) {
     if (textPagePtr == 0) {
-        return;
+        return nullptr;
     }
     FPDF_TEXTPAGE textPage = reinterpret_cast<FPDF_TEXTPAGE>(textPagePtr);
     if (textPage == NULL) {
@@ -874,6 +876,112 @@ JNI_FUNC(jobject, PdfiumCore, nativeGetCharBox)(JNI_ARGS, jlong textPagePtr, jin
     jclass clazz = env->FindClass("android/graphics/RectF");
     jmethodID constructorID = env->GetMethodID(clazz, "<init>", "(FFFF)V");
     return env->NewObject(clazz, constructorID, (jfloat) left, (jfloat) top, (jfloat) right, (jfloat) bottom);
+}
+
+JNI_FUNC(jlong, PdfiumCore, nativeGetTextObjectAtCharIndex)(JNI_ARGS, jlong textPagePtr, jint charIndex) {
+    if (textPagePtr == 0) return 0;
+    FPDF_TEXTPAGE textPage = reinterpret_cast<FPDF_TEXTPAGE>(textPagePtr);
+    FPDF_PAGEOBJECT obj = FPDFText_GetTextObject(textPage, (int) charIndex);
+    return reinterpret_cast<jlong>(obj);
+}
+
+JNI_FUNC(jboolean, PdfiumCore, nativeSetPageObjectText)(JNI_ARGS, jlong pageObjectPtr, jstring text) {
+    if (pageObjectPtr == 0) return JNI_FALSE;
+    FPDF_PAGEOBJECT pageObject = reinterpret_cast<FPDF_PAGEOBJECT>(pageObjectPtr);
+
+    const jchar *raw = env->GetStringChars(text, NULL);
+    if (raw == NULL) return JNI_FALSE;
+
+    // jchar is UTF-16 in platform-native order; Android is little-endian,
+    // which matches FPDF_WIDESTRING's expected UTF-16LE.
+    FPDF_BOOL result = FPDFText_SetText(pageObject, reinterpret_cast<FPDF_WIDESTRING>(raw));
+    env->ReleaseStringChars(text, raw);
+
+    return result ? JNI_TRUE : JNI_FALSE;
+}
+
+JNI_FUNC(jboolean, PdfiumCore, nativeGenerateContent)(JNI_ARGS, jlong pagePtr) {
+    if (pagePtr == 0) return JNI_FALSE;
+    FPDF_PAGE page = reinterpret_cast<FPDF_PAGE>(pagePtr);
+    return FPDFPage_GenerateContent(page) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNI_FUNC(jobject, PdfiumCore, nativeGetObjectBounds)(JNI_ARGS, jlong pageObjectPtr) {
+    if (pageObjectPtr == 0) return NULL;
+    FPDF_PAGEOBJECT obj = reinterpret_cast<FPDF_PAGEOBJECT>(pageObjectPtr);
+
+    float left, bottom, right, top;
+    if (!FPDFPageObj_GetBounds(obj, &left, &bottom, &right, &top)) {
+        return NULL;
+    }
+
+    jclass clazz = env->FindClass("android/graphics/RectF");
+    jmethodID constructorID = env->GetMethodID(clazz, "<init>", "(FFFF)V");
+    return env->NewObject(clazz, constructorID, left, top, right, bottom);
+}
+
+// --- save path: FPDF_FILEWRITE shim that forwards chunks to a Java OutputStream ---
+
+struct JavaOutputStreamWriter : public FPDF_FILEWRITE {
+    JNIEnv *env;
+    jobject outputStream;   // local ref, valid only for this native call
+    jmethodID writeMethod;  // void write(byte[], int, int)
+    jbyteArray buffer;      // global ref, grown on demand
+    jsize bufferSize;
+};
+
+static int WriteBlockCallback(FPDF_FILEWRITE *pThis, const void *pData, unsigned long size) {
+    JavaOutputStreamWriter *writer = static_cast<JavaOutputStreamWriter *>(pThis);
+    JNIEnv *env = writer->env;
+
+    if (size > (unsigned long) writer->bufferSize) {
+        env->DeleteGlobalRef(writer->buffer);
+        writer->bufferSize = (jsize) size;
+        jbyteArray newBuf = env->NewByteArray(writer->bufferSize);
+        writer->buffer = (jbyteArray) env->NewGlobalRef(newBuf);
+        env->DeleteLocalRef(newBuf);
+    }
+
+    env->SetByteArrayRegion(writer->buffer, 0, (jsize) size, reinterpret_cast<const jbyte *>(pData));
+    env->CallVoidMethod(writer->outputStream, writer->writeMethod, writer->buffer, 0, (jint) size);
+
+    if (env->ExceptionCheck()) {
+        env->ExceptionDescribe();
+        env->ExceptionClear();
+        return 0; // abort save
+    }
+    return 1;
+}
+
+JNI_FUNC(jboolean, PdfiumCore, nativeSaveDocument)(JNI_ARGS, jlong docPtr, jobject outputStream) {
+    if (docPtr == 0) return JNI_FALSE;
+    DocumentFile *doc = reinterpret_cast<DocumentFile *>(docPtr);
+    if (doc->pdfDocument == NULL) return JNI_FALSE;
+
+    jclass osClass = env->GetObjectClass(outputStream);
+    jmethodID writeMethod = env->GetMethodID(osClass, "write", "([BII)V");
+    if (writeMethod == NULL) {
+        LOGE("OutputStream has no write(byte[],int,int)");
+        return JNI_FALSE;
+    }
+
+    JavaOutputStreamWriter writer;
+    writer.version = 1;
+    writer.WriteBlock = WriteBlockCallback;
+    writer.env = env;
+    writer.outputStream = outputStream;
+    writer.writeMethod = writeMethod;
+    writer.bufferSize = 64 * 1024;
+
+    jbyteArray initialBuf = env->NewByteArray(writer.bufferSize);
+    writer.buffer = (jbyteArray) env->NewGlobalRef(initialBuf);
+    env->DeleteLocalRef(initialBuf);
+
+    FPDF_BOOL result = FPDF_SaveAsCopy(doc->pdfDocument, &writer, FPDF_NO_INCREMENTAL);
+
+    env->DeleteGlobalRef(writer.buffer);
+
+    return result ? JNI_TRUE : JNI_FALSE;
 }
 
 }//extern C

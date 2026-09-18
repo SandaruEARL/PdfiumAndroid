@@ -124,6 +124,16 @@ public class PdfiumCore {
 
     private native RectF nativeGetCharBox(long textPagePtr, int charIndex);
 
+    private native long nativeGetTextObjectAtCharIndex(long textPagePtr, int charIndex);
+
+    private native boolean nativeSetPageObjectText(long pageObjectPtr, String text);
+
+    private native boolean nativeGenerateContent(long pagePtr);
+
+    private native RectF nativeGetObjectBounds(long pageObjectPtr);
+
+    private native boolean nativeSaveDocument(long docPtr, java.io.OutputStream outputStream);
+
     /* synchronize native methods */
     private static final Object lock = new Object();
     private static Field mFdField = null;
@@ -629,6 +639,60 @@ public class PdfiumCore {
     public RectF getCharBox(PdfDocument doc, int pageIndex, int charIndex) {
         synchronized (lock) {
             return nativeGetCharBox(openTextPage(doc, pageIndex), charIndex);
+        }
+    }
+
+    /**
+     * Underlying FPDF_PAGEOBJECT for the character at charIndex, or 0 if there
+     * is none (whitespace, out of range, etc).
+     */
+    public long getTextObjectAtCharIndex(PdfDocument doc, int pageIndex, int charIndex) {
+        synchronized (lock) {
+            return nativeGetTextObjectAtCharIndex(openTextPage(doc, pageIndex), charIndex);
+        }
+    }
+
+    /**
+     * Replaces the text object's content in place, using whatever font is
+     * already attached to it. Returns false if that font can't encode the new
+     * text (missing glyphs) — caller falls back to inserting a new text object
+     * with a full-coverage font in that case.
+     *
+     * Does NOT persist anything — call generateContent() then saveDocument().
+     */
+    public boolean setPageObjectText(long pageObjectPtr, String text) {
+        synchronized (lock) {
+            return nativeSetPageObjectText(pageObjectPtr, text);
+        }
+    }
+
+    /**
+     * Rebuilds the page's content stream after object edits. Must be called
+     * before saveDocument() or the edits on this page are silently lost.
+     */
+    public boolean generateContent(PdfDocument doc, int pageIndex) {
+        synchronized (lock) {
+            Long pagePtr = doc.mNativePagesPtr.get(pageIndex);
+            if (pagePtr == null) return false;
+            return nativeGenerateContent(pagePtr);
+        }
+    }
+
+    /** Bounds of a page object in page coordinates, for Tier-2 fallback positioning. */
+    public RectF getObjectBounds(long pageObjectPtr) {
+        synchronized (lock) {
+            return nativeGetObjectBounds(pageObjectPtr);
+        }
+    }
+
+    /**
+     * Serializes the whole document to outputStream. Call generateContent() on
+     * every modified page first. Caller owns/closes the stream. Blocking —
+     * call off the main thread.
+     */
+    public boolean saveDocument(PdfDocument doc, java.io.OutputStream outputStream) {
+        synchronized (lock) {
+            return nativeSaveDocument(doc.mNativeDocPtr, outputStream);
         }
     }
 }
