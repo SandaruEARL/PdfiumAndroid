@@ -23,6 +23,7 @@ extern "C" {
     #include <string.h>
     #include <stdio.h>
 }
+#include <cmath>
 #include <vector>
 #include <fpdf_edit.h>
 #include <fpdf_save.h>
@@ -231,6 +232,50 @@ void rgbBitmapTo565(void *source, int sourceStride, void *dest, AndroidBitmapInf
         source = (char*) source + sourceStride;
         dest = (char*) dest + info->stride;
     }
+}
+
+// ===== Edit diagnostics. Set EDIT_DEBUG to 0 before releasing: logs contain document text. =====
+#define EDIT_DEBUG 1
+#if EDIT_DEBUG
+#define ELOG(...) LOGD(__VA_ARGS__)
+#else
+#define ELOG(...) ((void)0)
+#endif
+
+static int sEditSeq = 0;
+
+static long CurTid() { return (long) gettid(); }
+
+static const char* PageObjTypeName(int type) {
+    switch (type) {
+        case FPDF_PAGEOBJ_TEXT:    return "TEXT";
+        case FPDF_PAGEOBJ_PATH:    return "PATH";
+        case FPDF_PAGEOBJ_IMAGE:   return "IMAGE";
+        case FPDF_PAGEOBJ_SHADING: return "SHADING";
+        case FPDF_PAGEOBJ_FORM:    return "FORM";
+        default:                   return "UNKNOWN";
+    }
+}
+
+// Index of obj among the page's TOP-LEVEL objects, or -1 if absent
+// (inside a form XObject, or a stale pointer). Only compares pointers, so it is safe.
+static int FindTopLevelIndex(FPDF_PAGE page, FPDF_PAGEOBJECT obj) {
+    int count = FPDFPage_CountObjects(page);
+    for (int i = 0; i < count; i++) {
+        if (FPDFPage_GetObject(page, i) == obj) return i;
+    }
+    return -1;
+}
+
+static std::string CodeUnitsHex(const jchar* s, int len) {
+    std::string out;
+    char buf[8];
+    for (int i = 0; i < len && i < 32; i++) {
+        snprintf(buf, sizeof(buf), "%04X ", (unsigned) s[i]);
+        out += buf;
+    }
+    if (len > 32) out += "...";
+    return out;
 }
 
 extern "C" { //For JNI support
@@ -887,7 +932,7 @@ JNI_FUNC(jlong, PdfiumCore, nativeGetTextObjectAtCharIndex)(JNI_ARGS, jlong text
 }
 
 JNI_FUNC(jboolean, PdfiumCore, nativeSetPageObjectText)(JNI_ARGS, jlong pageObjectPtr, jstring text) {
-    if (pageObjectPtr == 0) return JNI_FALSE;
+    if (pageObjectPtr == 0 || text == NULL) return JNI_FALSE;
     FPDF_PAGEOBJECT pageObject = reinterpret_cast<FPDF_PAGEOBJECT>(pageObjectPtr);
 
     const jchar *raw = env->GetStringChars(text, NULL);
@@ -897,14 +942,22 @@ JNI_FUNC(jboolean, PdfiumCore, nativeSetPageObjectText)(JNI_ARGS, jlong pageObje
     wide.push_back(0);  // FPDF_WIDESTRING must be null-terminated
     env->ReleaseStringChars(text, raw);
 
+    ELOG("[SetText] tid=%ld obj=%p len=%d units=%s",
+         CurTid(), (void*) pageObject, (int) len, CodeUnitsHex(wide.data(), len).c_str());
+    ELOG("[SetText] obj type=%s", PageObjTypeName(FPDFPageObj_GetType(pageObject)));
     FPDF_BOOL result = FPDFText_SetText(pageObject, reinterpret_cast<FPDF_WIDESTRING>(wide.data()));
+    ELOG("[SetText] result=%d", (int) result);
     return result ? JNI_TRUE : JNI_FALSE;
 }
 
 JNI_FUNC(jboolean, PdfiumCore, nativeGenerateContent)(JNI_ARGS, jlong pagePtr) {
     if (pagePtr == 0) return JNI_FALSE;
     FPDF_PAGE page = reinterpret_cast<FPDF_PAGE>(pagePtr);
-    return FPDFPage_GenerateContent(page) ? JNI_TRUE : JNI_FALSE;
+    ELOG("[GenContent] tid=%ld page=%p topLevelObjs=%d",
+         CurTid(), (void*) page, FPDFPage_CountObjects(page));
+    FPDF_BOOL ok = FPDFPage_GenerateContent(page);
+    ELOG("[GenContent] result=%d", (int) ok);
+    return ok ? JNI_TRUE : JNI_FALSE;
 }
 
 JNI_FUNC(jobject, PdfiumCore, nativeGetObjectBounds)(JNI_ARGS, jlong pageObjectPtr) {
@@ -925,30 +978,75 @@ JNI_FUNC(jboolean, PdfiumCore, nativeRemovePageObject)(JNI_ARGS, jlong pagePtr, 
     if (pagePtr == 0 || pageObjectPtr == 0) return JNI_FALSE;
     FPDF_PAGE page = reinterpret_cast<FPDF_PAGE>(pagePtr);
     FPDF_PAGEOBJECT obj = reinterpret_cast<FPDF_PAGEOBJECT>(pageObjectPtr);
-    if (!FPDFPage_RemoveObject(page, obj)) return JNI_FALSE;
+
+    int idx = FindTopLevelIndex(page, obj);
+    ELOG("[Remove] tid=%ld obj=%p topIdx=%d pageObjs=%d",
+         CurTid(), (void*) obj, idx, FPDFPage_CountObjects(page));
+    if (idx < 0) {
+        LOGE("[Remove] obj %p is NOT a top-level page object (form XObject or stale). Not removed.", (void*) obj);
+        return JNI_FALSE;
+    }
+    if (!FPDFPage_RemoveObject(page, obj)) {
+        LOGE("[Remove] FPDFPage_RemoveObject failed for %p", (void*) obj);
+        return JNI_FALSE;
+    }
     FPDFPageObj_Destroy(obj);
+    ELOG("[Remove] ok, pageObjs now=%d", FPDFPage_CountObjects(page));
     return JNI_TRUE;
 }
 
 JNI_FUNC(jlong, PdfiumCore, nativeAddTextObject)(JNI_ARGS, jlong docPtr, jlong pagePtr, jstring text,
                                                  jfloat fontSize, jfloat x, jfloat baselineY,
                                                  jfloat maxWidth, jint argb) {
-    if (docPtr == 0 || pagePtr == 0 || text == NULL) return 0;
-    FPDF_DOCUMENT doc = reinterpret_cast<FPDF_DOCUMENT>(docPtr);
+    int seq = ++sEditSeq;
+    if (docPtr == 0 || pagePtr == 0 || text == NULL) {
+        LOGE("[Add#%d] bad args docPtr=%lld pagePtr=%lld text=%p",
+             seq, (long long) docPtr, (long long) pagePtr, (void*) text);
+        return 0;
+    }
+
+    // docPtr is a DocumentFile*, NOT a raw FPDF_DOCUMENT. (This is the crash fix.)
+    DocumentFile *docFile = reinterpret_cast<DocumentFile*>(docPtr);
+    if (docFile->pdfDocument == NULL) {
+        LOGE("[Add#%d] pdfDocument is null", seq);
+        return 0;
+    }
+    FPDF_DOCUMENT doc = docFile->pdfDocument;
     FPDF_PAGE page = reinterpret_cast<FPDF_PAGE>(pagePtr);
 
+    if (!std::isfinite(fontSize) || fontSize <= 0 || !std::isfinite(x) ||
+        !std::isfinite(baselineY) || !std::isfinite(maxWidth)) {
+        LOGE("[Add#%d] rejected non-finite/invalid numbers: fontSize=%.3f x=%.3f baselineY=%.3f maxWidth=%.3f",
+             seq, fontSize, x, baselineY, maxWidth);
+        return 0;
+    }
+
     const jchar *raw = env->GetStringChars(text, NULL);
-    if (raw == NULL) return 0;
+    if (raw == NULL) {
+        LOGE("[Add#%d] GetStringChars returned NULL", seq);
+        return 0;
+    }
     jsize len = env->GetStringLength(text);
     std::vector<jchar> wide(raw, raw + len);
     wide.push_back(0);
     env->ReleaseStringChars(text, raw);
 
+    ELOG("[Add#%d] ENTER tid=%ld len=%d units=%s fontSize=%.2f x=%.2f baselineY=%.2f maxWidth=%.2f argb=%08X",
+         seq, CurTid(), (int) len, CodeUnitsHex(wide.data(), len).c_str(),
+         fontSize, x, baselineY, maxWidth, (unsigned) argb);
+    ELOG("[Add#%d] doc=%p page=%p topLevelObjs=%d", seq, (void*) doc, (void*) page,
+         FPDFPage_CountObjects(page));
+
+    ELOG("[Add#%d] calling FPDFPageObj_NewTextObj", seq);
     FPDF_PAGEOBJECT obj = FPDFPageObj_NewTextObj(doc, "Helvetica", fontSize);
+    ELOG("[Add#%d] NewTextObj returned %p", seq, (void*) obj);
     if (obj == NULL) return 0;
 
     // Fails if Helvetica (WinAnsi) can't encode a character.
+    ELOG("[Add#%d] calling FPDFText_SetText", seq);
     if (!FPDFText_SetText(obj, reinterpret_cast<FPDF_WIDESTRING>(wide.data()))) {
+        LOGE("[Add#%d] SetText failed (unencodable character?) units=%s",
+             seq, CodeUnitsHex(wide.data(), len).c_str());
         FPDFPageObj_Destroy(obj);
         return 0;
     }
@@ -965,8 +1063,13 @@ JNI_FUNC(jlong, PdfiumCore, nativeAddTextObject)(JNI_ARGS, jlong docPtr, jlong p
             if (scale < 0.5) scale = 0.5;
         }
     }
+    ELOG("[Add#%d] scale=%.3f", seq, scale);
     FPDFPageObj_Transform(obj, scale, 0, 0, scale, x, baselineY);
+
+    ELOG("[Add#%d] calling FPDFPage_InsertObject", seq);
     FPDFPage_InsertObject(page, obj);
+    ELOG("[Add#%d] EXIT ok obj=%p topIdx=%d topLevelObjs=%d", seq, (void*) obj,
+         FindTopLevelIndex(page, obj), FPDFPage_CountObjects(page));
     return reinterpret_cast<jlong>(obj);
 }
 
