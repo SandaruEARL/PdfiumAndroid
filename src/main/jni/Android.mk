@@ -20,7 +20,7 @@ LOCAL_MODULE := aospPdfium
 
 ARCH_PATH = $(TARGET_ARCH_ABI)
 
-LOCAL_SRC_FILES := $(LOCAL_PATH)/lib/$(ARCH_PATH)/libmodpdfium.so
+LOCAL_SRC_FILES := lib/$(ARCH_PATH)/libmodpdfium.so
 
 include $(PREBUILT_SHARED_LIBRARY)
 
@@ -28,7 +28,7 @@ include $(PREBUILT_SHARED_LIBRARY)
 include $(CLEAR_VARS)
 LOCAL_MODULE := libmodft2
 
-LOCAL_SRC_FILES := $(LOCAL_PATH)/lib/$(ARCH_PATH)/libmodft2.so
+LOCAL_SRC_FILES := lib/$(ARCH_PATH)/libmodft2.so
 
 include $(PREBUILT_SHARED_LIBRARY)
 
@@ -36,7 +36,7 @@ include $(PREBUILT_SHARED_LIBRARY)
 include $(CLEAR_VARS)
 LOCAL_MODULE := libmodpng
 
-LOCAL_SRC_FILES := $(LOCAL_PATH)/lib/$(ARCH_PATH)/libmodpng.so
+LOCAL_SRC_FILES := lib/$(ARCH_PATH)/libmodpng.so
 
 include $(PREBUILT_SHARED_LIBRARY)
 
@@ -47,8 +47,8 @@ LOCAL_MODULE := jniPdfium
 LOCAL_CFLAGS += -DHAVE_PTHREADS
 LOCAL_C_INCLUDES += $(LOCAL_PATH)/include
 LOCAL_SHARED_LIBRARIES += aospPdfium
-LOCAL_LDLIBS += -llog -landroid -ljnigraphics
+LOCAL_LDLIBS += -llog -landroid -ljnigraphics -Wl,--no-gc-sections
 
-LOCAL_SRC_FILES :=  $(LOCAL_PATH)/src/mainJNILib.cpp
+LOCAL_SRC_FILES :=  src/mainJNILib.cpp
 
 include $(BUILD_SHARED_LIBRARY)
