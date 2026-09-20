@@ -1119,6 +1119,82 @@ JNI_FUNC(jlong, PdfiumCore, nativeAddTextObject)(JNI_ARGS, jlong docPtr, jlong p
     return reinterpret_cast<jlong>(obj);
 }
 
+JNI_FUNC(jlong, PdfiumCore, nativeGetObjectFont)(JNI_ARGS, jlong pageObjectPtr) {
+    if (pageObjectPtr == 0) return 0;
+    FPDF_PAGEOBJECT obj = reinterpret_cast<FPDF_PAGEOBJECT>(pageObjectPtr);
+    if (FPDFPageObj_GetType(obj) != FPDF_PAGEOBJ_TEXT) return 0;
+    FPDF_FONT font = FPDFTextObj_GetFont(obj);
+    ELOG("[GetFont] obj=%p font=%p", (void*) obj, (void*) font);
+    return reinterpret_cast<jlong>(font);
+}
+
+// Builds a new text object from a font handle already attached to some other
+// object on the page (obtained via nativeGetObjectFont) — i.e. the run's own
+// embedded font, not a standard substitute. Returns 0 if the font's subset
+// doesn't cover every character in `text`, exactly like nativeAddTextObject.
+JNI_FUNC(jlong, PdfiumCore, nativeCreateTextObjectFromFont)(JNI_ARGS, jlong docPtr, jlong pagePtr, jlong fontPtr,
+                                                            jstring text, jfloat fontSize, jfloat x, jfloat baselineY,
+                                                            jfloat maxWidth, jint argb) {
+    int seq = ++sEditSeq;
+    if (docPtr == 0 || pagePtr == 0 || fontPtr == 0 || text == NULL) {
+        LOGE("[Reuse#%d] bad args docPtr=%lld pagePtr=%lld fontPtr=%lld text=%p",
+             seq, (long long) docPtr, (long long) pagePtr, (long long) fontPtr, (void*) text);
+        return 0;
+    }
+    DocumentFile *docFile = reinterpret_cast<DocumentFile*>(docPtr);
+    if (docFile->pdfDocument == NULL) return 0;
+    FPDF_DOCUMENT doc = docFile->pdfDocument;
+    FPDF_PAGE page = reinterpret_cast<FPDF_PAGE>(pagePtr);
+    FPDF_FONT font = reinterpret_cast<FPDF_FONT>(fontPtr);
+
+    if (!std::isfinite(fontSize) || fontSize <= 0 || !std::isfinite(x) ||
+        !std::isfinite(baselineY) || !std::isfinite(maxWidth)) {
+        LOGE("[Reuse#%d] rejected non-finite/invalid numbers", seq);
+        return 0;
+    }
+
+    const jchar *raw = env->GetStringChars(text, NULL);
+    if (raw == NULL) return 0;
+    jsize len = env->GetStringLength(text);
+    std::vector<jchar> wide(raw, raw + len);
+    wide.push_back(0);
+    env->ReleaseStringChars(text, raw);
+
+    ELOG("[Reuse#%d] ENTER tid=%ld font=%p len=%d units=%s fontSize=%.2f",
+         seq, CurTid(), (void*) font, (int) len, CodeUnitsHex(wide.data(), len).c_str(), fontSize);
+
+    FPDF_PAGEOBJECT obj = FPDFPageObj_CreateTextObj(doc, font, fontSize);
+    if (obj == NULL) {
+        LOGE("[Reuse#%d] CreateTextObj returned null", seq);
+        return 0;
+    }
+
+    if (!FPDFText_SetText(obj, reinterpret_cast<FPDF_WIDESTRING>(wide.data()))) {
+        // Heuristic said every char was in the original run's text, but the
+        // subset still doesn't cover it (e.g. different case, ligature).
+        ELOG("[Reuse#%d] SetText failed despite char-presence heuristic, discarding", seq);
+        FPDFPageObj_Destroy(obj);
+        return 0;
+    }
+
+    FPDFPageObj_SetFillColor(obj, (argb >> 16) & 0xFF, (argb >> 8) & 0xFF, argb & 0xFF, 255);
+
+    double scale = 1.0;
+    float l, b, r, t;
+    if (maxWidth > 0 && FPDFPageObj_GetBounds(obj, &l, &b, &r, &t)) {
+        float width = r - l;
+        if (width > maxWidth) {
+            scale = maxWidth / width;
+            if (scale < 0.5) scale = 0.5;
+        }
+    }
+    FPDFPageObj_Transform(obj, scale, 0, 0, scale, x, baselineY);
+
+    FPDFPage_InsertObject(page, obj);
+    ELOG("[Reuse#%d] EXIT ok obj=%p topLevelObjs=%d", seq, (void*) obj, FPDFPage_CountObjects(page));
+    return reinterpret_cast<jlong>(obj);
+}
+
 // --- save path: FPDF_FILEWRITE shim that forwards chunks to a Java OutputStream ---
 
 struct JavaOutputStreamWriter : public FPDF_FILEWRITE {

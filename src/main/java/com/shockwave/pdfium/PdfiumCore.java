@@ -689,13 +689,39 @@ public class PdfiumCore {
 
     private native long nativeAddTextObject(long docPtr, long pagePtr, String text, float fontSize,
                                             float x, float baselineY, float maxWidth, int argb, int styleFlags);
-    
+
     public long addTextObject(PdfDocument doc, int pageIndex, String text, float fontSize,
                               float x, float baselineY, float maxWidth, int argb, int styleFlags) {
         synchronized (lock) {
             Long pagePtr = doc.mNativePagesPtr.get(pageIndex);
             if (pagePtr == null) return 0;
             return nativeAddTextObject(doc.mNativeDocPtr, pagePtr, text, fontSize, x, baselineY, maxWidth, argb, styleFlags);
+        }
+    }
+
+    private native long nativeGetObjectFont(long pageObjectPtr);
+
+    /** The FPDF_FONT already attached to an existing text object, or 0 if unavailable. */
+    public long getObjectFont(long pageObjectPtr) {
+        synchronized (lock) {
+            return nativeGetObjectFont(pageObjectPtr);
+        }
+    }
+
+    private native long nativeCreateTextObjectFromFont(long docPtr, long pagePtr, long fontPtr, String text,
+                                                       float fontSize, float x, float baselineY, float maxWidth, int argb);
+
+    /**
+     * Inserts a new text object built from a font handle obtained via getObjectFont —
+     * i.e. the run's own embedded font, not a standard substitute. Returns 0 if that
+     * font's subset can't encode `text`.
+     */
+    public long createTextObjectFromFont(PdfDocument doc, int pageIndex, long fontPtr, String text,
+                                         float fontSize, float x, float baselineY, float maxWidth, int argb) {
+        synchronized (lock) {
+            Long pagePtr = doc.mNativePagesPtr.get(pageIndex);
+            if (pagePtr == null) return 0;
+            return nativeCreateTextObjectFromFont(doc.mNativeDocPtr, pagePtr, fontPtr, text, fontSize, x, baselineY, maxWidth, argb);
         }
     }
 
