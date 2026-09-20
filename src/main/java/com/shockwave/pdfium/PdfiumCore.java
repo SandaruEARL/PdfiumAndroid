@@ -134,6 +134,9 @@ public class PdfiumCore {
 
     private native boolean nativeSaveDocument(long docPtr, java.io.OutputStream outputStream);
 
+    private native boolean nativeSetObjectStyle(long pageObjectPtr, int argb, float scale,
+                                                float anchorX, float anchorY);
+
     /* synchronize native methods */
     private static final Object lock = new Object();
     private static Field mFdField = null;
@@ -683,12 +686,16 @@ public class PdfiumCore {
      * (origin bottom-left, points). Returns the object pointer, or 0 if the text
      * can't be encoded.
      */
+
+    private native long nativeAddTextObject(long docPtr, long pagePtr, String text, float fontSize,
+                                            float x, float baselineY, float maxWidth, int argb, int styleFlags);
+    
     public long addTextObject(PdfDocument doc, int pageIndex, String text, float fontSize,
-                              float x, float baselineY, float maxWidth, int argb) {
+                              float x, float baselineY, float maxWidth, int argb, int styleFlags) {
         synchronized (lock) {
             Long pagePtr = doc.mNativePagesPtr.get(pageIndex);
             if (pagePtr == null) return 0;
-            return nativeAddTextObject(doc.mNativeDocPtr, pagePtr, text, fontSize, x, baselineY, maxWidth, argb);
+            return nativeAddTextObject(doc.mNativeDocPtr, pagePtr, text, fontSize, x, baselineY, maxWidth, argb, styleFlags);
         }
     }
 
@@ -713,6 +720,12 @@ public class PdfiumCore {
     public RectF getObjectBounds(long pageObjectPtr) {
         synchronized (lock) {
             return nativeGetObjectBounds(pageObjectPtr);
+        }
+    }
+
+    public boolean setObjectStyle(long pageObjectPtr, int argb, float scale, float anchorX, float anchorY) {
+        synchronized (lock) {
+            return nativeSetObjectStyle(pageObjectPtr, argb, scale, anchorX, anchorY);
         }
     }
 

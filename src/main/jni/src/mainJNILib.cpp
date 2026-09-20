@@ -974,6 +974,20 @@ JNI_FUNC(jobject, PdfiumCore, nativeGetObjectBounds)(JNI_ARGS, jlong pageObjectP
     return env->NewObject(clazz, constructorID, left, top, right, bottom);
 }
 
+
+JNI_FUNC(jboolean, PdfiumCore, nativeSetObjectStyle)(JNI_ARGS, jlong pageObjectPtr, jint argb,
+                                                     jfloat scale, jfloat anchorX, jfloat anchorY) {
+    if (pageObjectPtr == 0) return JNI_FALSE;
+    FPDF_PAGEOBJECT obj = reinterpret_cast<FPDF_PAGEOBJECT>(pageObjectPtr);
+    if (!FPDFPageObj_SetFillColor(obj, (argb >> 16) & 0xFF, (argb >> 8) & 0xFF, argb & 0xFF, 255))
+        return JNI_FALSE;
+    if (scale > 0 && std::fabs(scale - 1.0f) > 1e-3f) {
+        // scale about (anchorX, anchorY) so the text doesn't drift
+        FPDFPageObj_Transform(obj, scale, 0, 0, scale, anchorX * (1 - scale), anchorY * (1 - scale));
+    }
+    return JNI_TRUE;
+}
+
 JNI_FUNC(jboolean, PdfiumCore, nativeRemovePageObject)(JNI_ARGS, jlong pagePtr, jlong pageObjectPtr) {
     if (pagePtr == 0 || pageObjectPtr == 0) return JNI_FALSE;
     FPDF_PAGE page = reinterpret_cast<FPDF_PAGE>(pagePtr);
@@ -997,7 +1011,7 @@ JNI_FUNC(jboolean, PdfiumCore, nativeRemovePageObject)(JNI_ARGS, jlong pagePtr, 
 
 JNI_FUNC(jlong, PdfiumCore, nativeAddTextObject)(JNI_ARGS, jlong docPtr, jlong pagePtr, jstring text,
                                                  jfloat fontSize, jfloat x, jfloat baselineY,
-                                                 jfloat maxWidth, jint argb) {
+                                                  jfloat maxWidth, jint argb, jint styleFlags) {
     int seq = ++sEditSeq;
     if (docPtr == 0 || pagePtr == 0 || text == NULL) {
         LOGE("[Add#%d] bad args docPtr=%lld pagePtr=%lld text=%p",
@@ -1038,7 +1052,12 @@ JNI_FUNC(jlong, PdfiumCore, nativeAddTextObject)(JNI_ARGS, jlong docPtr, jlong p
          FPDFPage_CountObjects(page));
 
     ELOG("[Add#%d] calling FPDFPageObj_NewTextObj", seq);
-    FPDF_PAGEOBJECT obj = FPDFPageObj_NewTextObj(doc, "Helvetica", fontSize);
+    // styleFlags: bit0 = bold, bit1 = italic
+        const char *fontName = ((styleFlags & 3) == 3) ? "Helvetica-BoldOblique"
+                             : (styleFlags & 1)        ? "Helvetica-Bold"
+                             : (styleFlags & 2)        ? "Helvetica-Oblique"
+                                                       : "Helvetica";
+        FPDF_PAGEOBJECT obj = FPDFPageObj_NewTextObj(doc, fontName, fontSize);
     ELOG("[Add#%d] NewTextObj returned %p", seq, (void*) obj);
     if (obj == NULL) return 0;
 
