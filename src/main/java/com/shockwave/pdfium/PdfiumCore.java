@@ -134,8 +134,8 @@ public class PdfiumCore {
 
     private native boolean nativeSaveDocument(long docPtr, java.io.OutputStream outputStream);
 
-    private native boolean nativeSetObjectStyle(long pageObjectPtr, int argb, float scale,
-                                                float anchorX, float anchorY);
+    private native boolean nativeSetObjectStyle(long pagePtr, long pageObjectPtr, int argb,
+                                            float scale, float anchorX, float anchorY, int styleFlags);
 
     /* synchronize native methods */
     private static final Object lock = new Object();
@@ -723,9 +723,12 @@ public class PdfiumCore {
         }
     }
 
-    public boolean setObjectStyle(long pageObjectPtr, int argb, float scale, float anchorX, float anchorY) {
+    public boolean setObjectStyle(PdfDocument doc, int pageIndex, long pageObjectPtr, int argb,
+                              float scale, float anchorX, float anchorY, int styleFlags) {
         synchronized (lock) {
-            return nativeSetObjectStyle(pageObjectPtr, argb, scale, anchorX, anchorY);
+            Long pagePtr = doc.mNativePagesPtr.get(pageIndex);
+            if (pagePtr == null) return false;
+            return nativeSetObjectStyle(pagePtr, pageObjectPtr, argb, scale, anchorX, anchorY, styleFlags);
         }
     }
 

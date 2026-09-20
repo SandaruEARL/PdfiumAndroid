@@ -975,19 +975,46 @@ JNI_FUNC(jobject, PdfiumCore, nativeGetObjectBounds)(JNI_ARGS, jlong pageObjectP
 }
 
 
-JNI_FUNC(jboolean, PdfiumCore, nativeSetObjectStyle)(JNI_ARGS, jlong pageObjectPtr, jint argb,
-                                                     jfloat scale, jfloat anchorX, jfloat anchorY) {
-    if (pageObjectPtr == 0) return JNI_FALSE;
+JNI_FUNC(jboolean, PdfiumCore, nativeSetObjectStyle)(JNI_ARGS, jlong pagePtr, jlong pageObjectPtr,
+        jint argb, jfloat scale, jfloat anchorX, jfloat anchorY, jint styleFlags) {
+    // styleFlags: bit0 = bold, bit1 = italic, bit2 = underline
+    if (pagePtr == 0 || pageObjectPtr == 0) return JNI_FALSE;
+    FPDF_PAGE page = reinterpret_cast<FPDF_PAGE>(pagePtr);
     FPDF_PAGEOBJECT obj = reinterpret_cast<FPDF_PAGEOBJECT>(pageObjectPtr);
-    if (!FPDFPageObj_SetFillColor(obj, (argb >> 16) & 0xFF, (argb >> 8) & 0xFF, argb & 0xFF, 255))
-        return JNI_FALSE;
+    const unsigned red = (argb >> 16) & 0xFF, green = (argb >> 8) & 0xFF, blue = argb & 0xFF;
+
+    if (!FPDFPageObj_SetFillColor(obj, red, green, blue, 255)) return JNI_FALSE;
+
     if (scale > 0 && std::fabs(scale - 1.0f) > 1e-3f) {
-        // scale about (anchorX, anchorY) so the text doesn't drift
         FPDFPageObj_Transform(obj, scale, 0, 0, scale, anchorX * (1 - scale), anchorY * (1 - scale));
+    }
+
+    float l = 0, bt = 0, rt = 0, t = 0;
+    const bool haveBounds = FPDFPageObj_GetBounds(obj, &l, &bt, &rt, &t);
+    const float height = haveBounds ? (t - bt) : 0.f;
+
+    if (styleFlags & 1) {  // faux bold: fill + stroke in the same colour
+        FPDFTextObj_SetTextRenderMode(obj, FPDF_TEXTRENDERMODE_FILL_STROKE);
+        FPDFPageObj_SetStrokeColor(obj, red, green, blue, 255);
+        FPDFPageObj_SetStrokeWidth(obj, height > 0 ? height * 0.03f : 0.6f);
+    }
+
+    if ((styleFlags & 4) && haveBounds) {  // underline: thin rect under the baseline
+        const float th = std::fmax(height * 0.05f, 0.5f);
+        FPDF_PAGEOBJECT line = FPDFPageObj_CreateNewRect(l, anchorY - th * 2.0f, rt - l, th);
+        if (line) {
+            FPDFPageObj_SetFillColor(line, red, green, blue, 255);
+            FPDFPath_SetDrawMode(line, FPDF_FILLMODE_WINDING, 0);
+            FPDFPage_InsertObject(page, line);
+        }
+    }
+
+    if (styleFlags & 2) {  // faux italic: shear about the baseline
+        const float c = 0.2126f;
+        FPDFPageObj_Transform(obj, 1, 0, c, 1, -c * anchorY, 0);
     }
     return JNI_TRUE;
 }
-
 JNI_FUNC(jboolean, PdfiumCore, nativeRemovePageObject)(JNI_ARGS, jlong pagePtr, jlong pageObjectPtr) {
     if (pagePtr == 0 || pageObjectPtr == 0) return JNI_FALSE;
     FPDF_PAGE page = reinterpret_cast<FPDF_PAGE>(pagePtr);
